@@ -23,7 +23,7 @@
 #include <fmt/chrono.h>
 #include <fmt/core.h>
 #include <fmt/ostream.h>
-
+#include <set>
 #include "stats_printer.h"
 
 namespace
@@ -142,6 +142,67 @@ std::vector<std::string> champsim::plain_printer::format(DRAM_CHANNEL::stats_typ
   else
     lines.push_back(fmt::format("{} REFRESHES ISSUED: -", stats.name));
 
+  // ===== Per-core fairness stats =====
+  // Collect all known cpu IDs
+  std::set<uint32_t> cpus;
+  for (auto& [k, v] : stats.per_core_rq_admitted) cpus.insert(k);
+  for (auto& [k, v] : stats.per_core_rq_dispatched) cpus.insert(k);
+  for (auto& [k, v] : stats.per_core_dbus_served) cpus.insert(k);
+
+  if (!cpus.empty()) {
+    lines.push_back(fmt::format(""));
+    lines.push_back(fmt::format("{} === Per-Core DRAM Fairness ===", stats.name));
+
+    for (auto cpu_id : cpus) {
+      // Skip the "max" sentinel value (means CPU was never set)
+      if (cpu_id == std::numeric_limits<uint32_t>::max()) continue;
+
+      auto get = [](const auto& m, auto key) -> uint64_t {
+        auto it = m.find(key);
+        return it != m.end() ? it->second : 0;
+      };
+      auto get_long = [](const auto& m, auto key) -> long {
+        auto it = m.find(key);
+        return it != m.end() ? it->second : 0;
+      };
+
+      lines.push_back(fmt::format("  CPU {}:", cpu_id));
+      lines.push_back(fmt::format("    RQ admitted: {:10}  RQ rejected (full): {:10}",
+          get(stats.per_core_rq_admitted, cpu_id),
+          get(stats.per_core_rq_full, cpu_id)));
+      lines.push_back(fmt::format("    WQ admitted: {:10}  WQ rejected (full): {:10}",
+          get(stats.per_core_wq_admitted, cpu_id),
+          get(stats.per_core_wq_full, cpu_id)));
+      lines.push_back(fmt::format("    Bank dispatched: {:10}  Row HIT: {:10}  Row MISS: {:10}",
+          get(stats.per_core_rq_dispatched, cpu_id),
+          get(stats.per_core_row_buffer_hit, cpu_id),
+          get(stats.per_core_row_buffer_miss, cpu_id)));
+      lines.push_back(fmt::format("    DQ bus served: {:10}  DQ bus congested: {:10}  congestion cycles: {:10}",
+          get(stats.per_core_dbus_served, cpu_id),
+          get(stats.per_core_dbus_congested, cpu_id),
+          get_long(stats.per_core_dbus_congestion_cycles, cpu_id)));
+
+      // Per-bank distribution (compact)
+      std::string bank_line = "    Banks: ";
+      for (auto& [key, count] : stats.per_core_bank_access) {
+        if (key.first == cpu_id) {
+          bank_line += fmt::format("B{}={} ", key.second, count);
+        }
+      }
+      lines.push_back(bank_line);
+    }
+
+    // Queue position priority
+    if (!stats.queue_position_rq_admitted.empty()) {
+      lines.push_back(fmt::format("  initiate_requests() queue priority:"));
+      for (auto& [pos, count] : stats.queue_position_rq_admitted) {
+        lines.push_back(fmt::format("    Queue position {}: {:10} requests admitted", pos, count));
+      }
+    }
+
+    lines.push_back(fmt::format("{} === End Per-Core Stats ===", stats.name));
+  }
+
   return lines;
 }
 
@@ -200,7 +261,16 @@ std::vector<std::string> champsim::plain_printer::format(champsim::phase_stats& 
     lines.emplace_back("");
     std::move(std::begin(sublines), std::end(sublines), std::back_inserter(lines));
   }
-
+  lines.emplace_back("");
+  lines.emplace_back("Per-CPU DRAM ROI Snapshots");
+  for (std::size_t ch = 0; ch < stats.per_cpu_dram_roi_stats.size(); ch++) {
+    for (auto& [cpu_id, cpu_stats] : stats.per_cpu_dram_roi_stats[ch]) {
+      lines.push_back(fmt::format(""));
+      lines.push_back(fmt::format("=== Channel {} ROI snapshot at CPU {} finish ===", ch, cpu_id));
+      auto sublines = format(cpu_stats);
+      std::move(std::begin(sublines), std::end(sublines), std::back_inserter(lines));
+    }
+  }
   return lines;
 }
 

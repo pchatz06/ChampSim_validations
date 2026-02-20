@@ -253,8 +253,6 @@ void DRAM_CHANNEL::swap_write_mode()
     write_mode = !write_mode;
   }
 }
-
-// Look for requests to put on the bus
 long DRAM_CHANNEL::populate_dbus()
 {
   long progress{0};
@@ -297,7 +295,10 @@ long DRAM_CHANNEL::populate_dbus()
       } else {
         ++sim_stats.RQ_ROW_BUFFER_MISS;
       }
-
+      
+      uint32_t cpu_id = iter_next_process->pkt->value().cpu;
+      sim_stats.per_core_dbus_served[cpu_id]++;
+      
       ++progress;
     } else {
       // Bus is congested
@@ -307,6 +308,20 @@ long DRAM_CHANNEL::populate_dbus()
         sim_stats.dbus_cycle_congested += (dbus_cycle_available - current_time) / data_bus_period;
       }
       ++sim_stats.dbus_count_congested;
+      
+      uint32_t waiting_cpu = iter_next_process->pkt->value().cpu;
+      sim_stats.per_core_dbus_congested[waiting_cpu]++;
+      // NEW: track which core suffered from congestion
+      // The request that wanted the bus but couldn't get it
+      
+      if (active_request != std::end(bank_request)) {
+        sim_stats.per_core_dbus_congestion_cycles[waiting_cpu] +=
+            (active_request->ready_time - current_time) / data_bus_period;
+      } else {
+        sim_stats.per_core_dbus_congestion_cycles[waiting_cpu] +=
+            (dbus_cycle_available - current_time) / data_bus_period;
+      }
+      // END NEW
     }
   }
 
@@ -355,7 +370,6 @@ DRAM_CHANNEL::queue_type::iterator DRAM_CHANNEL::schedule_packet()
   }
   return (iter_next_schedule);
 }
-
 long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
 {
   long progress{0};
@@ -366,7 +380,16 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
     if (!bank_request[op_idx].valid && !bank_request[op_idx].under_refresh) {
       bool row_buffer_hit = (bank_request[op_idx].open_row.has_value() && *(bank_request[op_idx].open_row) == op_row);
 
-      // this bank is now busy
+      // NEW: use cpu field (NOT asid[0])
+      uint32_t cpu_id = pkt->value().cpu;
+      sim_stats.per_core_rq_dispatched[cpu_id]++;
+      sim_stats.per_core_bank_access[{cpu_id, op_idx}]++;
+      if (row_buffer_hit)
+        sim_stats.per_core_row_buffer_hit[cpu_id]++;
+      else
+        sim_stats.per_core_row_buffer_miss[cpu_id]++;
+      // END NEW
+
       auto row_charge_delay = champsim::chrono::clock::duration{bank_request[op_idx].open_row.has_value() ? tRP + tRCD : tRCD};
       bank_request[op_idx] = {true,  row_buffer_hit,        false,
                               false, std::optional{op_row}, current_time + tCAS + (row_buffer_hit ? champsim::chrono::clock::duration{} : row_charge_delay),
@@ -377,9 +400,9 @@ long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
       ++progress;
     }
   }
-
   return progress;
 }
+
 
 void MEMORY_CONTROLLER::initialize()
 {
@@ -427,8 +450,14 @@ void MEMORY_CONTROLLER::end_phase(unsigned cpu)
     chan.end_phase(cpu);
   }
 }
+void DRAM_CHANNEL::end_phase(unsigned cpu)
+{
+  // Snapshot the current sim_stats for this CPU's ROI
+  per_cpu_roi_stats[cpu] = sim_stats;
 
-void DRAM_CHANNEL::end_phase(unsigned /*cpu*/) { roi_stats = sim_stats; }
+  // Keep the existing behavior for the aggregate
+  roi_stats = sim_stats;
+}
 
 bool DRAM_ADDRESS_MAPPING::is_collision(champsim::address a, champsim::address b) const
 {
@@ -511,15 +540,27 @@ void DRAM_CHANNEL::check_read_collision()
 void MEMORY_CONTROLLER::initiate_requests()
 {
   // Initiate read requests
+  std::size_t queue_pos = 0;  // NEW: track which upper-level queue feeds first
   for (auto* ul : queues) {
     for (auto q : {std::ref(ul->RQ), std::ref(ul->PQ)}) {
-      auto [begin, end] = champsim::get_span_p(std::cbegin(q.get()), std::cend(q.get()), [ul, this](const auto& pkt) { return this->add_rq(pkt, ul); });
+      auto [begin, end] = champsim::get_span_p(std::cbegin(q.get()), std::cend(q.get()), [ul, this, &queue_pos](const auto& pkt) {
+        bool success = this->add_rq(pkt, ul);
+        if (success) {
+          // NEW: record which queue position got its request admitted
+          auto& chan = channels[address_mapping.get_channel(pkt.address)];
+          chan.sim_stats.queue_position_rq_admitted[queue_pos]++;
+          // END NEW
+        }
+        return success;
+      });
       q.get().erase(begin, end);
     }
 
     // Initiate write requests
     auto [wq_begin, wq_end] = champsim::get_span_p(std::cbegin(ul->WQ), std::cend(ul->WQ), [this](const auto& pkt) { return this->add_wq(pkt); });
     ul->WQ.erase(wq_begin, wq_end);
+
+    queue_pos++;  // NEW
   }
 }
 
@@ -528,6 +569,7 @@ DRAM_CHANNEL::request_type::request_type(const typename champsim::channel::reque
 {
   asid[0] = req.asid[0];
   asid[1] = req.asid[1];
+  cpu = req.cpu;  // NEW: copy CPU ID
 }
 
 bool MEMORY_CONTROLLER::add_rq(const request_type& packet, champsim::channel* ul)
@@ -543,8 +585,16 @@ bool MEMORY_CONTROLLER::add_rq(const request_type& packet, champsim::channel* ul
     if (packet.response_requested)
       rq_it->value().to_return = {&ul->returned};
 
+    // NEW: track successful admission per core
+    channel.sim_stats.per_core_rq_admitted[packet.cpu]++;
+    // END NEW
+
     return true;
   }
+
+  // NEW: track RQ full per core
+  channel.sim_stats.per_core_rq_full[packet.cpu]++;
+  // END NEW
 
   return false;
 }
@@ -561,10 +611,18 @@ bool MEMORY_CONTROLLER::add_wq(const request_type& packet)
     wq_it->value().scheduled = false;
     wq_it->value().ready_time = current_time;
 
+    // NEW: track successful admission per core
+    channel.sim_stats.per_core_wq_admitted[packet.cpu]++;
+
+    // END NEW
+
     return true;
   }
 
   ++channel.sim_stats.WQ_FULL;
+  // NEW: track WQ full per core
+  channel.sim_stats.per_core_wq_full[packet.cpu]++;
+  // END NEW
   return false;
 }
 

@@ -17,7 +17,7 @@
 #include <algorithm>
 #include <utility>
 #include <nlohmann/json.hpp>
-
+#include <set>
 #include "stats_printer.h"
 
 void to_json(nlohmann::json& j, const O3_CPU::stats_type& stats)
@@ -76,12 +76,53 @@ void to_json(nlohmann::json& j, const CACHE::stats_type& stats)
 
 void to_json(nlohmann::json& j, const DRAM_CHANNEL::stats_type stats)
 {
+  // Build per-core sub-objects
+  nlohmann::json per_core = nlohmann::json::object();
+
+  std::set<uint8_t> cpus;
+  for (auto& [k, v] : stats.per_core_rq_admitted) cpus.insert(k);
+  for (auto& [k, v] : stats.per_core_rq_dispatched) cpus.insert(k);
+  for (auto& [k, v] : stats.per_core_dbus_served) cpus.insert(k);
+
+  for (auto cpu_id : cpus) {
+    std::string key = "cpu" + std::to_string(cpu_id);
+    per_core[key] = {
+      {"rq_admitted", stats.per_core_rq_admitted.count(cpu_id) ? stats.per_core_rq_admitted.at(cpu_id) : 0},
+      {"rq_rejected", stats.per_core_rq_full.count(cpu_id) ? stats.per_core_rq_full.at(cpu_id) : 0},
+      {"wq_admitted", stats.per_core_wq_admitted.count(cpu_id) ? stats.per_core_wq_admitted.at(cpu_id) : 0},
+      {"wq_rejected", stats.per_core_wq_full.count(cpu_id) ? stats.per_core_wq_full.at(cpu_id) : 0},
+      {"bank_dispatched", stats.per_core_rq_dispatched.count(cpu_id) ? stats.per_core_rq_dispatched.at(cpu_id) : 0},
+      {"row_buffer_hit", stats.per_core_row_buffer_hit.count(cpu_id) ? stats.per_core_row_buffer_hit.at(cpu_id) : 0},
+      {"row_buffer_miss", stats.per_core_row_buffer_miss.count(cpu_id) ? stats.per_core_row_buffer_miss.at(cpu_id) : 0},
+      {"dbus_served", stats.per_core_dbus_served.count(cpu_id) ? stats.per_core_dbus_served.at(cpu_id) : 0},
+      {"dbus_congested", stats.per_core_dbus_congested.count(cpu_id) ? stats.per_core_dbus_congested.at(cpu_id) : 0},
+      {"dbus_congestion_cycles", stats.per_core_dbus_congestion_cycles.count(cpu_id) ? stats.per_core_dbus_congestion_cycles.at(cpu_id) : 0}
+    };
+
+    // Bank access distribution for this core
+    nlohmann::json bank_dist = nlohmann::json::object();
+    for (auto& [bkey, count] : stats.per_core_bank_access) {
+      if (bkey.first == cpu_id) {
+        bank_dist["bank" + std::to_string(bkey.second)] = count;
+      }
+    }
+    per_core[key]["bank_access"] = bank_dist;
+  }
+
+  // Queue position priority
+  nlohmann::json queue_priority = nlohmann::json::object();
+  for (auto& [pos, count] : stats.queue_position_rq_admitted) {
+    queue_priority["position" + std::to_string(pos)] = count;
+  }
+
   j = nlohmann::json{{"RQ ROW_BUFFER_HIT", stats.RQ_ROW_BUFFER_HIT},
                      {"RQ ROW_BUFFER_MISS", stats.RQ_ROW_BUFFER_MISS},
                      {"WQ ROW_BUFFER_HIT", stats.WQ_ROW_BUFFER_HIT},
                      {"WQ ROW_BUFFER_MISS", stats.WQ_ROW_BUFFER_MISS},
                      {"AVG DBUS CONGESTED CYCLE", (std::ceil(stats.dbus_cycle_congested) / std::ceil(stats.dbus_count_congested))},
-                     {"REFRESHES ISSUED", stats.refresh_cycles}};
+                     {"REFRESHES ISSUED", stats.refresh_cycles},
+                     {"per_core", per_core},
+                     {"queue_priority", queue_priority}};
 }
 
 namespace champsim

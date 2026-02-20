@@ -95,24 +95,24 @@ struct DRAM_CHANNEL final : public champsim::operable {
   using response_type = typename champsim::channel::response_type;
 
   const DRAM_ADDRESS_MAPPING address_mapping;
-
   struct request_type {
-    bool scheduled = false;
-    bool forward_checked = false;
+      bool scheduled = false;
+      bool forward_checked = false;
 
-    uint8_t asid[2] = {std::numeric_limits<uint8_t>::max(), std::numeric_limits<uint8_t>::max()};
+      uint8_t asid[2] = {std::numeric_limits<uint8_t>::max(), std::numeric_limits<uint8_t>::max()};
+      uint32_t cpu = std::numeric_limits<uint32_t>::max();  // NEW: carry CPU ID
 
-    uint32_t pf_metadata = 0;
+      uint32_t pf_metadata = 0;
 
-    champsim::address address{};
-    champsim::address v_address{};
-    champsim::address data{};
-    champsim::chrono::clock::time_point ready_time = champsim::chrono::clock::time_point::max();
+      champsim::address address{};
+      champsim::address v_address{};
+      champsim::address data{};
+      champsim::chrono::clock::time_point ready_time = champsim::chrono::clock::time_point::max();
 
-    std::vector<uint64_t> instr_depend_on_me{};
-    std::vector<std::deque<response_type>*> to_return{};
+      std::vector<uint64_t> instr_depend_on_me{};
+      std::vector<std::deque<response_type>*> to_return{};
 
-    explicit request_type(const typename champsim::channel::request_type& req);
+      explicit request_type(const typename champsim::channel::request_type& req);
   };
   using value_type = request_type;
   using queue_type = std::vector<std::optional<value_type>>;
@@ -156,6 +156,7 @@ struct DRAM_CHANNEL final : public champsim::operable {
 
   using stats_type = dram_stats;
   stats_type roi_stats, sim_stats;
+  std::map<unsigned, stats_type> per_cpu_roi_stats;
 
   // Latencies
   const champsim::chrono::clock::duration tRP, tRCD, tCAS, tRAS, tREF, tRFC, DRAM_DBUS_TURN_AROUND_TIME, DRAM_DBUS_RETURN_TIME, DRAM_DBUS_BANKGROUP_STALL;

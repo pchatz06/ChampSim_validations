@@ -191,6 +191,9 @@ phase_stats do_phase(const phase_info& phase, environment& env, std::vector<trac
                  [](const DRAM_CHANNEL& chan) { return chan.sim_stats; });
   std::transform(std::begin(dram.channels), std::end(dram.channels), std::back_inserter(stats.roi_dram_stats),
                  [](const DRAM_CHANNEL& chan) { return chan.roi_stats; });
+  std::transform(std::begin(dram.channels), std::end(dram.channels),
+                 std::back_inserter(stats.per_cpu_dram_roi_stats),
+                 [](const DRAM_CHANNEL& chan) { return chan.per_cpu_roi_stats; });
 
   return stats;
 }
