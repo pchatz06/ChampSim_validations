@@ -114,11 +114,58 @@ long MEMORY_CONTROLLER::operate()
 
   return progress;
 }
+// void DRAM_CHANNEL::debug_print_rq() const
+// {
+//   for (std::size_t i = 0; i < RQ.size(); ++i) {
+//     if (RQ[i].has_value()) {
+//       const auto& e = RQ[i].value();
+//       fmt::print("  RQ[{}] cpu={} addr=0x{:x} scheduled={} fwd={}\n",
+//                  i,
+//                  e.cpu,
+//                  e.address.to<uint64_t>(),
+//                  e.scheduled,
+//                  e.forward_checked);
+//     }
+//   }
+// }
+void DRAM_CHANNEL::debug_print_rq() const
+{
+  std::size_t rq_occu = 0;
+  for (std::size_t i = 0; i < RQ.size(); ++i) {
+    if (RQ[i].has_value()) {
+      ++rq_occu;
+      const auto& entry = RQ[i].value();
 
+      auto ch  = address_mapping.get_channel(entry.address);
+      auto rk  = address_mapping.get_rank(entry.address);
+      auto bg  = address_mapping.get_bankgroup(entry.address);
+      auto bk  = address_mapping.get_bank(entry.address);
+      auto row = address_mapping.get_row(entry.address);
+      auto col = address_mapping.get_column(entry.address);
+      fmt::print("  RQ[{:2}] cpu={} addr=0x{:012x} v_addr=0x{:012x} "
+           "ch={} rk={} bg={} bk={} row={} col={} "
+           "scheduled={} fwd_checked={} ready_time={}\n",
+           i,
+           entry.cpu,
+           entry.address.to<uint64_t>(),
+           entry.v_address.to<uint64_t>(),
+           ch, rk, bg, bk, row, col,
+           entry.scheduled,
+           entry.forward_checked,
+           entry.ready_time.time_since_epoch().count());
+                }
+
+  }
+  fmt::print("  RQ occupancy: {}/{}\n", rq_occu, RQ.size());
+}
 long DRAM_CHANNEL::operate()
 {
   long progress{0};
-
+  // ---- GDB VALIDATION: print RQ state at start of every cycle ----
+  fmt::print("[DRAM_CHANNEL] cycle={} time={} write_mode={}\n",
+             current_cycle(), current_time.time_since_epoch().count(), write_mode);
+  debug_print_rq();
+  // ---- END GDB VALIDATION ---
   if (warmup) {
     for (auto& entry : RQ) {
       if (entry.has_value()) {
@@ -327,6 +374,7 @@ long DRAM_CHANNEL::populate_dbus()
 
   return progress;
 }
+
 
 std::size_t DRAM_CHANNEL::bank_request_index(champsim::address addr) const
 {

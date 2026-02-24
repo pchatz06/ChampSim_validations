@@ -183,6 +183,7 @@ struct DRAM_CHANNEL final : public champsim::operable {
   void begin_phase() final;
   void end_phase(unsigned cpu) final;
   void print_deadlock() final;
+  void debug_print_rq() const;
 
   std::size_t bank_request_capacity() const;
   std::size_t bankgroup_request_capacity() const;
