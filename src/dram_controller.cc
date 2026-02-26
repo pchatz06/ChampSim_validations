@@ -162,9 +162,9 @@ long DRAM_CHANNEL::operate()
 {
   long progress{0};
   // ---- GDB VALIDATION: print RQ state at start of every cycle ----
-  fmt::print("[DRAM_CHANNEL] cycle={} time={} write_mode={}\n",
-             current_cycle(), current_time.time_since_epoch().count(), write_mode);
-  debug_print_rq();
+  // fmt::print("[DRAM_CHANNEL] cycle={} time={} write_mode={}\n",
+  //            current_cycle(), current_time.time_since_epoch().count(), write_mode);
+  // debug_print_rq();
   // ---- END GDB VALIDATION ---
   if (warmup) {
     for (auto& entry : RQ) {
@@ -594,7 +594,7 @@ void MEMORY_CONTROLLER::initiate_requests()
       auto [begin, end] = champsim::get_span_p(std::cbegin(q.get()), std::cend(q.get()), [ul, this, &queue_pos](const auto& pkt) {
         bool success = this->add_rq(pkt, ul);
         if (success) {
-          // NEW: record which queue position got its request admitted
+          // NEW
           auto& chan = channels[address_mapping.get_channel(pkt.address)];
           chan.sim_stats.queue_position_rq_admitted[queue_pos]++;
           // END NEW

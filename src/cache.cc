@@ -31,7 +31,7 @@
 #include "util/algorithm.h"
 #include "util/bits.h"
 #include "util/span.h"
-
+#include <iostream>
 CACHE::CACHE(CACHE&& other)
     : operable(other),
 
@@ -876,41 +876,130 @@ void CACHE::begin_phase()
     ul->sim_stats = ul_new_sim_stats;
   }
 }
-
 void CACHE::end_phase(unsigned finished_cpu)
 {
-  finished_cpu = finished_cpu;
-  roi_stats.total_miss_latency_cycles = sim_stats.total_miss_latency_cycles;
 
-  roi_stats.hits = sim_stats.hits;
-  roi_stats.misses = sim_stats.misses;
-  roi_stats.mshr_merge = sim_stats.mshr_merge;
-  roi_stats.mshr_return = sim_stats.mshr_return;
+  if (finished_cpu == (this->cpu) || this->NAME == "LLC") {
+    finished_cpu = finished_cpu;
+    roi_stats.total_miss_latency_cycles = sim_stats.total_miss_latency_cycles;
 
-  roi_stats.pf_requested = sim_stats.pf_requested;
-  roi_stats.pf_issued = sim_stats.pf_issued;
-  roi_stats.pf_useful = sim_stats.pf_useful;
-  roi_stats.pf_useless = sim_stats.pf_useless;
-  roi_stats.pf_fill = sim_stats.pf_fill;
+    roi_stats.hits = sim_stats.hits;
+    roi_stats.misses = sim_stats.misses;
+    roi_stats.mshr_merge = sim_stats.mshr_merge;
+    roi_stats.mshr_return = sim_stats.mshr_return;
 
-  for (auto* ul : upper_levels) {
-    ul->roi_stats.RQ_ACCESS = ul->sim_stats.RQ_ACCESS;
-    ul->roi_stats.RQ_MERGED = ul->sim_stats.RQ_MERGED;
-    ul->roi_stats.RQ_FULL = ul->sim_stats.RQ_FULL;
-    ul->roi_stats.RQ_TO_CACHE = ul->sim_stats.RQ_TO_CACHE;
+    roi_stats.pf_requested = sim_stats.pf_requested;
+    roi_stats.pf_issued = sim_stats.pf_issued;
+    roi_stats.pf_useful = sim_stats.pf_useful;
+    roi_stats.pf_useless = sim_stats.pf_useless;
+    roi_stats.pf_fill = sim_stats.pf_fill;
 
-    ul->roi_stats.PQ_ACCESS = ul->sim_stats.PQ_ACCESS;
-    ul->roi_stats.PQ_MERGED = ul->sim_stats.PQ_MERGED;
-    ul->roi_stats.PQ_FULL = ul->sim_stats.PQ_FULL;
-    ul->roi_stats.PQ_TO_CACHE = ul->sim_stats.PQ_TO_CACHE;
+    for (auto* ul : upper_levels) {
+      ul->roi_stats.RQ_ACCESS = ul->sim_stats.RQ_ACCESS;
+      ul->roi_stats.RQ_MERGED = ul->sim_stats.RQ_MERGED;
+      ul->roi_stats.RQ_FULL = ul->sim_stats.RQ_FULL;
+      ul->roi_stats.RQ_TO_CACHE = ul->sim_stats.RQ_TO_CACHE;
 
-    ul->roi_stats.WQ_ACCESS = ul->sim_stats.WQ_ACCESS;
-    ul->roi_stats.WQ_MERGED = ul->sim_stats.WQ_MERGED;
-    ul->roi_stats.WQ_FULL = ul->sim_stats.WQ_FULL;
-    ul->roi_stats.WQ_TO_CACHE = ul->sim_stats.WQ_TO_CACHE;
-    ul->roi_stats.WQ_FORWARD = ul->sim_stats.WQ_FORWARD;
+      ul->roi_stats.PQ_ACCESS = ul->sim_stats.PQ_ACCESS;
+      ul->roi_stats.PQ_MERGED = ul->sim_stats.PQ_MERGED;
+      ul->roi_stats.PQ_FULL = ul->sim_stats.PQ_FULL;
+      ul->roi_stats.PQ_TO_CACHE = ul->sim_stats.PQ_TO_CACHE;
+
+      ul->roi_stats.WQ_ACCESS = ul->sim_stats.WQ_ACCESS;
+      ul->roi_stats.WQ_MERGED = ul->sim_stats.WQ_MERGED;
+      ul->roi_stats.WQ_FULL = ul->sim_stats.WQ_FULL;
+      ul->roi_stats.WQ_TO_CACHE = ul->sim_stats.WQ_TO_CACHE;
+      ul->roi_stats.WQ_FORWARD = ul->sim_stats.WQ_FORWARD;
+    }
   }
+
+  if (this->NAME == "LLC") 
+  {
+    std::cout << "CPU " << finished_cpu << " finished. LLC stats snapshot:\n";
+
+    // List of access types
+    const access_type types[] = {
+        access_type::LOAD, access_type::RFO, access_type::PREFETCH,
+        access_type::WRITE, access_type::TRANSLATION
+    };
+
+    uint64_t total_hits = 0;
+    uint64_t total_misses = 0;
+    uint64_t total_mshr_merge = 0;
+    uint64_t total_mshr_return = 0;
+
+    // Sum totals across all types for this CPU
+    for (const auto type : types) 
+    {
+        uint64_t hits_val   = sim_stats.hits.value_or({type, finished_cpu}, 0);
+        uint64_t misses_val = sim_stats.misses.value_or({type, finished_cpu}, 0);
+        uint64_t mshr_merge_val = sim_stats.mshr_merge.value_or({type, finished_cpu}, 0);
+        uint64_t mshr_return_val = sim_stats.mshr_return.value_or({type, finished_cpu}, 0);
+
+        total_hits       += hits_val;
+        total_misses     += misses_val;
+        total_mshr_merge += mshr_merge_val;
+        total_mshr_return += mshr_return_val;
+
+        std::cout << "cpu" << finished_cpu << "->LLC "
+                  << access_type_names.at(static_cast<unsigned>(type))
+                  << " ACCESS: " << hits_val + misses_val
+                  << " HIT: " << hits_val
+                  << " MISS: " << misses_val
+                  << " MSHR_MERGE: " << mshr_merge_val << "\n";
+    }
+
+    std::cout << "cpu" << finished_cpu << "->LLC TOTAL ACCESS: " 
+              << total_hits + total_misses 
+              << " HIT: " << total_hits 
+              << " MISS: " << total_misses 
+              << " MSHR_MERGE: " << total_mshr_merge << "\n";
+
+    std::cout << "cpu" << finished_cpu << "->LLC PREFETCH REQUESTED: " << sim_stats.pf_requested
+              << " ISSUED: " << sim_stats.pf_issued
+              << " USEFUL: " << sim_stats.pf_useful
+              << " USELESS: " << sim_stats.pf_useless << "\n";
+
+    std::cout << "cpu" << finished_cpu << "->LLC AVERAGE MISS LATENCY: "
+              << std::ceil((total_misses ? sim_stats.total_miss_latency_cycles / total_misses : 0))
+              << " cycles\n\n";
+  }
+
 }
+// void CACHE::end_phase(unsigned finished_cpu)
+// {
+//   finished_cpu = finished_cpu;
+//   roi_stats.total_miss_latency_cycles = sim_stats.total_miss_latency_cycles;
+//
+//   roi_stats.hits = sim_stats.hits;
+//   roi_stats.misses = sim_stats.misses;
+//   roi_stats.mshr_merge = sim_stats.mshr_merge;
+//   roi_stats.mshr_return = sim_stats.mshr_return;
+//
+//   roi_stats.pf_requested = sim_stats.pf_requested;
+//   roi_stats.pf_issued = sim_stats.pf_issued;
+//   roi_stats.pf_useful = sim_stats.pf_useful;
+//   roi_stats.pf_useless = sim_stats.pf_useless;
+//   roi_stats.pf_fill = sim_stats.pf_fill;
+//
+//   for (auto* ul : upper_levels) {
+//     ul->roi_stats.RQ_ACCESS = ul->sim_stats.RQ_ACCESS;
+//     ul->roi_stats.RQ_MERGED = ul->sim_stats.RQ_MERGED;
+//     ul->roi_stats.RQ_FULL = ul->sim_stats.RQ_FULL;
+//     ul->roi_stats.RQ_TO_CACHE = ul->sim_stats.RQ_TO_CACHE;
+//
+//     ul->roi_stats.PQ_ACCESS = ul->sim_stats.PQ_ACCESS;
+//     ul->roi_stats.PQ_MERGED = ul->sim_stats.PQ_MERGED;
+//     ul->roi_stats.PQ_FULL = ul->sim_stats.PQ_FULL;
+//     ul->roi_stats.PQ_TO_CACHE = ul->sim_stats.PQ_TO_CACHE;
+//
+//     ul->roi_stats.WQ_ACCESS = ul->sim_stats.WQ_ACCESS;
+//     ul->roi_stats.WQ_MERGED = ul->sim_stats.WQ_MERGED;
+//     ul->roi_stats.WQ_FULL = ul->sim_stats.WQ_FULL;
+//     ul->roi_stats.WQ_TO_CACHE = ul->sim_stats.WQ_TO_CACHE;
+//     ul->roi_stats.WQ_FORWARD = ul->sim_stats.WQ_FORWARD;
+//   }
+// }
 
 template <typename T>
 bool CACHE::should_activate_prefetcher(const T& pkt) const
