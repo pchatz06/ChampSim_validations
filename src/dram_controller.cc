@@ -391,65 +391,281 @@ std::size_t DRAM_CHANNEL::bankgroup_request_index(champsim::address addr) const
   return (op_rank * address_mapping.bankgroups() + op_bankgroup);
 }
 
-// Look for queued packets that have not been scheduled
+void MEMORY_CONTROLLER::set_num_cpus(uint32_t n)
+{
+  n = (n == 0) ? 1u : n;
+  for (auto& ch : channels)
+    ch.set_num_cpus(n);
+}
+
 DRAM_CHANNEL::queue_type::iterator DRAM_CHANNEL::schedule_packet()
 {
-  // Look for queued packets that have not been scheduled
-  // prioritize packets that are ready to execute, bank is free
-  auto next_schedule = [this](const auto& lhs, const auto& rhs) {
-    if (!(rhs.has_value() && !rhs.value().scheduled)) {
-      return true;
-    }
-    if (!(lhs.has_value() && !lhs.value().scheduled)) {
-      return false;
+  auto& queue = write_mode ? WQ : RQ;
+  rr_used_on_last_pick = false;
+
+  constexpr uint32_t INVALID_CPU = std::numeric_limits<uint32_t>::max();
+
+  auto eligible = [](const auto& e) {
+    return e.has_value() && !e.value().scheduled;
+  };
+
+  auto rr_rank = [this](uint32_t cpu) -> uint32_t {
+    if (cpu == INVALID_CPU || rr_num_cpus == 0)
+      return std::numeric_limits<uint32_t>::max();
+    // Priority queue order: rr_head, rr_head+1, rr_head+2, ...
+    return (cpu + rr_num_cpus - rr_head) % rr_num_cpus;
+  };
+
+  auto better = [this, &eligible, &rr_rank](const auto& lhs, const auto& rhs) {
+    const bool lvalid = eligible(lhs);
+    const bool rvalid = eligible(rhs);
+
+    if (!rvalid) return lvalid;
+    if (!lvalid) return false;
+
+    const auto lidx = this->bank_request_index(lhs.value().address);
+    const auto ridx = this->bank_request_index(rhs.value().address);
+    const bool lready = !this->bank_request[lidx].valid;
+    const bool rready = !this->bank_request[ridx].valid;
+
+    if (lready != rready)
+      return lready; // bank-ready first
+
+    if (lhs.value().ready_time != rhs.value().ready_time)
+      return lhs.value().ready_time < rhs.value().ready_time; // strict
+
+    // exact tie: apply RR priority only on reads
+    if (!write_mode) {
+      const uint32_t lr = rr_rank(lhs.value().cpu);
+      const uint32_t rr = rr_rank(rhs.value().cpu);
+      if (lr != rr)
+        return lr < rr;
     }
 
-    auto lop_idx = this->bank_request_index(lhs.value().address);
-    auto rop_idx = this->bank_request_index(rhs.value().address);
-    auto rready = !this->bank_request[rop_idx].valid;
-    auto lready = !this->bank_request[lop_idx].valid;
-    return (rready == lready) ? lhs.value().ready_time <= rhs.value().ready_time : lready;
+    // deterministic fallback
+    return lhs.value().address < rhs.value().address;
   };
-  queue_type::iterator iter_next_schedule;
-  if (write_mode) {
-    iter_next_schedule = std::min_element(std::begin(WQ), std::end(WQ), next_schedule);
-  } else {
-    iter_next_schedule = std::min_element(std::begin(RQ), std::end(RQ), next_schedule);
+
+  auto it = std::min_element(std::begin(queue), std::end(queue), better);
+
+  // Count tie stats once for FINAL pick (not inside comparator)
+  if (!write_mode && it != std::end(queue) && eligible(*it)) {
+    const auto& win = it->value();
+    const bool win_ready = !bank_request[bank_request_index(win.address)].valid;
+    const auto win_time = win.ready_time;
+    const uint32_t win_rank = rr_rank(win.cpu);
+
+    bool has_exact_tie = false;
+    uint32_t loser_cpu = INVALID_CPU;
+    uint32_t loser_rank = std::numeric_limits<uint32_t>::max();
+
+    for (auto jt = std::begin(queue); jt != std::end(queue); ++jt) {
+      if (jt == it || !eligible(*jt))
+        continue;
+
+      const auto& oth = jt->value();
+      const bool oth_ready = !bank_request[bank_request_index(oth.address)].valid;
+
+      if (oth_ready != win_ready || oth.ready_time != win_time)
+        continue;
+
+      has_exact_tie = true;
+
+      const uint32_t orank = rr_rank(oth.cpu);
+      // If winner beat this one by RR priority, candidate for "loss" stat
+      if (win_rank < orank && orank < loser_rank) {
+        loser_rank = orank;
+        loser_cpu = oth.cpu;
+      }
+    }
+
+    if (has_exact_tie)
+      sim_stats.rr_tie_candidates++;
+
+    if (win.cpu != INVALID_CPU && loser_cpu != INVALID_CPU) {
+      rr_used_on_last_pick = true;
+      sim_stats.rr_tie_decisions++;
+      sim_stats.per_core_rr_tie_wins[win.cpu]++;
+      sim_stats.per_core_rr_tie_losses[loser_cpu]++;
+    }
   }
-  return (iter_next_schedule);
+
+  return it;
 }
+
+
 long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
 {
   long progress{0};
-  if (pkt->has_value() && pkt->value().ready_time <= current_time) {
-    auto op_row = address_mapping.get_row(pkt->value().address);
-    auto op_idx = bank_request_index(pkt->value().address);
+  constexpr uint32_t INVALID_CPU = std::numeric_limits<uint32_t>::max();
 
-    if (!bank_request[op_idx].valid && !bank_request[op_idx].under_refresh) {
-      bool row_buffer_hit = (bank_request[op_idx].open_row.has_value() && *(bank_request[op_idx].open_row) == op_row);
+  if (!(pkt->has_value() && pkt->value().ready_time <= current_time))
+    return progress;
 
-      // NEW: use cpu field (NOT asid[0])
-      uint32_t cpu_id = pkt->value().cpu;
+  auto op_row = address_mapping.get_row(pkt->value().address);
+  auto op_idx = bank_request_index(pkt->value().address);
+
+  if (!bank_request[op_idx].valid && !bank_request[op_idx].under_refresh) {
+    bool row_buffer_hit =
+      (bank_request[op_idx].open_row.has_value() && *(bank_request[op_idx].open_row) == op_row);
+
+    uint32_t cpu_id = pkt->value().cpu;
+    if (cpu_id != INVALID_CPU) {
       sim_stats.per_core_rq_dispatched[cpu_id]++;
       sim_stats.per_core_bank_access[{cpu_id, op_idx}]++;
       if (row_buffer_hit)
         sim_stats.per_core_row_buffer_hit[cpu_id]++;
       else
         sim_stats.per_core_row_buffer_miss[cpu_id]++;
-      // END NEW
 
-      auto row_charge_delay = champsim::chrono::clock::duration{bank_request[op_idx].open_row.has_value() ? tRP + tRCD : tRCD};
-      bank_request[op_idx] = {true,  row_buffer_hit,        false,
-                              false, std::optional{op_row}, current_time + tCAS + (row_buffer_hit ? champsim::chrono::clock::duration{} : row_charge_delay),
-                              pkt};
-      pkt->value().scheduled = true;
-      pkt->value().ready_time = champsim::chrono::clock::time_point::max();
-
-      ++progress;
+      uint64_t wait_cycles = static_cast<uint64_t>((current_time - pkt->value().ready_time) / clock_period);
+      sim_stats.per_core_qwait_sum[cpu_id] += wait_cycles;
+      sim_stats.per_core_qwait_cnt[cpu_id] += 1;
     }
+
+    auto row_charge_delay = champsim::chrono::clock::duration{
+      bank_request[op_idx].open_row.has_value() ? tRP + tRCD : tRCD
+    };
+
+    bank_request[op_idx] = {
+      true, row_buffer_hit, false, false, std::optional{op_row},
+      current_time + tCAS + (row_buffer_hit ? champsim::chrono::clock::duration{} : row_charge_delay),
+      pkt
+    };
+
+    pkt->value().scheduled = true;
+    pkt->value().ready_time = champsim::chrono::clock::time_point::max();
+
+    // Rotate RR priority queue by ONE step only if RR tie-break was used
+    if (!write_mode && rr_used_on_last_pick && rr_num_cpus > 0) {
+      rr_head = (rr_head + 1u) % rr_num_cpus; // 0 1 2 3 -> 1 2 3 0
+    }
+
+    ++progress;
   }
+
   return progress;
 }
+
+// // Look for queued packets that have not been scheduled
+// DRAM_CHANNEL::queue_type::iterator DRAM_CHANNEL::schedule_packet()
+// {
+//   // Look for queued packets that have not been scheduled
+//   // prioritize packets that are ready to execute, bank is free
+//   auto next_schedule = [this](const auto& lhs, const auto& rhs) {
+//     if (!(rhs.has_value() && !rhs.value().scheduled)) {
+//       return true;
+//     }
+//     if (!(lhs.has_value() && !lhs.value().scheduled)) {
+//       return false;
+//     }
+//
+//     auto lop_idx = this->bank_request_index(lhs.value().address);
+//     auto rop_idx = this->bank_request_index(rhs.value().address);
+//     auto rready = !this->bank_request[rop_idx].valid;
+//     auto lready = !this->bank_request[lop_idx].valid;
+//
+//     if (rready == lready) {
+//       if (lhs.value().ready_time == rhs.value().ready_time) {
+//         // exact tie candidate (same bank-ready class + same ready_time)
+//         sim_stats.rr_tie_candidates++;
+//
+//         // FIXED behavior: strict compare, so exact tie does NOT replace current best
+//         // (for old behavior experiment, change to <=)
+//         const bool choose_lhs = (lhs.value().ready_time < rhs.value().ready_time);
+//
+//         if (choose_lhs) {
+//           sim_stats.rr_tie_decisions++;
+//         }
+//
+//         uint32_t winner_cpu = choose_lhs ? lhs.value().cpu : rhs.value().cpu;
+//         uint32_t loser_cpu  = choose_lhs ? rhs.value().cpu : lhs.value().cpu;
+//
+//         if (winner_cpu != std::numeric_limits<uint32_t>::max())
+//           sim_stats.per_core_rr_tie_wins[winner_cpu]++;
+//         if (loser_cpu != std::numeric_limits<uint32_t>::max())
+//           sim_stats.per_core_rr_tie_losses[loser_cpu]++;
+//
+//         return choose_lhs;
+//       }
+//
+//       // non-tie same readiness: normal strict time compare
+//       return lhs.value().ready_time < rhs.value().ready_time;
+//     }
+//
+//     // different readiness classes: bank-ready first
+//     return lready;
+//   };
+//
+//   queue_type::iterator iter_next_schedule;
+//   if (write_mode) {
+//     iter_next_schedule = std::min_element(std::begin(WQ), std::end(WQ), next_schedule);
+//   } else {
+//     iter_next_schedule = std::min_element(std::begin(RQ), std::end(RQ), next_schedule);
+//   }
+//   return (iter_next_schedule);
+// }
+//
+//
+// long DRAM_CHANNEL::service_packet(DRAM_CHANNEL::queue_type::iterator pkt)
+// {
+//   long progress{0};
+//   if (pkt->has_value() && pkt->value().ready_time <= current_time) {
+//     auto op_row = address_mapping.get_row(pkt->value().address);
+//     auto op_idx = bank_request_index(pkt->value().address);
+//
+//     if (!bank_request[op_idx].valid && !bank_request[op_idx].under_refresh) {
+//       bool row_buffer_hit = (bank_request[op_idx].open_row.has_value() && *(bank_request[op_idx].open_row) == op_row);
+//
+//       // NEW: use cpu field (NOT asid[0])
+//       uint32_t cpu_id = pkt->value().cpu;
+//       sim_stats.per_core_rq_dispatched[cpu_id]++;
+//       sim_stats.per_core_bank_access[{cpu_id, op_idx}]++;
+//       if (row_buffer_hit)
+//         sim_stats.per_core_row_buffer_hit[cpu_id]++;
+//       else
+//         sim_stats.per_core_row_buffer_miss[cpu_id]++;
+//       // END NEW
+//
+//       // DRAM_WAIT probe: queue wait from DRAM enqueue (ready_time set on add_rq/add_wq)
+//       // to bank scheduling time (current_time here).
+//       // static std::array<uint64_t, 2> qwait_sum{0, 0};
+//       // static std::array<uint64_t, 2> qwait_cnt{0, 0};
+//       // static uint64_t next_dump = 100000; // print every 100k serviced requests
+//
+//       if (cpu_id != std::numeric_limits<uint32_t>::max()) {
+//         uint64_t wait_cycles = static_cast<uint64_t>((current_time - pkt->value().ready_time) / clock_period);
+//         sim_stats.per_core_qwait_sum[cpu_id] += wait_cycles;
+//         sim_stats.per_core_qwait_cnt[cpu_id] += 1;
+//       }
+//
+//       // uint64_t total_cnt = qwait_cnt[0] + qwait_cnt[1];
+//       // if (total_cnt >= next_dump) {
+//       //   double avg0 = qwait_cnt[0] ? static_cast<double>(qwait_sum[0]) / static_cast<double>(qwait_cnt[0]) : 0.0;
+//       //   double avg1 = qwait_cnt[1] ? static_cast<double>(qwait_sum[1]) / static_cast<double>(qwait_cnt[1]) : 0.0;
+//       //   fmt::print("[DRAM_WAIT] cnt0={} cnt1={} avg0={:.2f} avg1={:.2f}\n",
+//       //              qwait_cnt[0], qwait_cnt[1], avg0, avg1);
+//       //   next_dump += 100000;
+//       // }
+//       //
+//
+//       auto row_charge_delay = champsim::chrono::clock::duration{bank_request[op_idx].open_row.has_value() ? tRP + tRCD : tRCD};
+//       bank_request[op_idx] = {true,  row_buffer_hit,        false,
+//                               false, std::optional{op_row}, current_time + tCAS + (row_buffer_hit ? champsim::chrono::clock::duration{} : row_charge_delay),
+//                               pkt};
+//       pkt->value().scheduled = true;
+//       pkt->value().ready_time = champsim::chrono::clock::time_point::max();
+//
+//       // // Rotate RR epoch on every successful READ dispatch
+//       // if (!write_mode && pkt->value().cpu != std::numeric_limits<uint32_t>::max()) {
+//       //   rr_next_cpu = (pkt->value().cpu == 0u) ? 1u : 0u;
+//       // }
+//
+//       ++progress;
+//     }
+//   }
+//   return progress;
+// }
 
 
 void MEMORY_CONTROLLER::initialize()

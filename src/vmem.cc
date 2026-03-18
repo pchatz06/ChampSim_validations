@@ -18,6 +18,9 @@
 
 #include <cassert>
 #include <fmt/core.h>
+#include <cstdio>
+#include <cstdlib>
+#include <string_view>
 
 #include "champsim.h"
 #include "dram_controller.h"
@@ -104,8 +107,23 @@ void VirtualMemory::ppage_pop()
 
 std::size_t VirtualMemory::available_ppages() const { return (ppage_free_list.size()); }
 
+// uint32_t VirtualMemory::asid_key(uint32_t cpu_num) const
+// {
+//   if (cpu_num < cpu_asid_map.size()) {
+//     return cpu_asid_map[cpu_num];
+//   }
+//   return cpu_num;
+// }
+
+// void VirtualMemory::set_cpu_asid_map(std::vector<uint32_t> map)
+// {
+//   cpu_asid_map = std::move(map);
+// }
 std::pair<champsim::page_number, champsim::chrono::clock::duration> VirtualMemory::va_to_pa(uint32_t cpu_num, champsim::page_number vaddr)
 {
+  // const auto asid = asid_key(cpu_num);
+  // auto [ppage, fault] = vpage_to_ppage_map.try_emplace({asid, champsim::page_number{vaddr}}, ppage_front());
+
   auto [ppage, fault] = vpage_to_ppage_map.try_emplace({cpu_num, champsim::page_number{vaddr}}, ppage_front());
 
   // this vpage doesn't yet have a ppage mapping
@@ -115,9 +133,12 @@ std::pair<champsim::page_number, champsim::chrono::clock::duration> VirtualMemor
 
   auto penalty = fault ? minor_fault_penalty : champsim::chrono::clock::duration::zero();
 
-  if constexpr (champsim::debug_print) {
-    fmt::print("[VMEM] {} paddr: {} vpage: {} fault: {}\n", __func__, ppage->second, champsim::page_number{vaddr}, fault);
-  }
+  // if constexpr (champsim::debug_print) {
+  // fmt::print("[VMEM] {} cpu_num: {} paddr: {} vpage: {} fault: {}\n", __func__, cpu_num, ppage->second, champsim::page_number{vaddr}, fault);
+  // }
+
+  // temporary debug
+  // fmt::print("VA2PA in_cpu={} key_cpu={} vaddr={}\n", cpu_num, asid, vaddr);
 
   return std::pair{ppage->second, penalty};
 }
@@ -125,6 +146,9 @@ std::pair<champsim::page_number, champsim::chrono::clock::duration> VirtualMemor
 std::pair<champsim::address, champsim::chrono::clock::duration> VirtualMemory::get_pte_pa(uint32_t cpu_num, champsim::page_number vaddr, std::size_t level)
 {
   champsim::dynamic_extent pte_table_entry_extent{champsim::address::bits, shamt(level + 1)};
+  // const auto asid = asid_key(cpu_num);
+  // auto [ppage, fault] =page_table.try_emplace({asid, level, champsim::address_slice{pte_table_entry_extent, vaddr}}, champsim::splice(active_pte_page, next_pte_page));
+
   auto [ppage, fault] =
       page_table.try_emplace({cpu_num, level, champsim::address_slice{pte_table_entry_extent, vaddr}}, champsim::splice(active_pte_page, next_pte_page));
 

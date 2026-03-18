@@ -22,6 +22,9 @@
 #include <iomanip>
 #include <numeric>
 #include <fmt/core.h>
+#include <array>
+#include <map>
+#include <limits>
 
 #include "bandwidth.h"
 #include "champsim.h"
@@ -218,6 +221,8 @@ bool CACHE::handle_fill(const mshr_type& fill_mshr)
     if (!success) {
       return false;
     }
+    if (fill_mshr.cpu != std::numeric_limits<uint32_t>::max())
+      sim_stats.writebacks_per_cpu[fill_mshr.cpu]++;   // NEW-stat
   }
 
   champsim::address evicting_address{};
@@ -485,18 +490,112 @@ long CACHE::operate()
           ? (champsim::bandwidth::maximum_type)std::max((size_t)initiate_tag_bw.amount_remaining() / std::size(upper_levels), size_t{1})
           : champsim::bandwidth::maximum_type{};
 
-  for (auto* ul : upper_levels) {
+  // --- LLC fairness probe ---
+  // START OF NEW CODE
+  auto queue_head_ready = [&can_translate](const auto& q) {
+    return !q.empty() && can_translate(q.front());
+  };
+
+  auto ul_has_ready_head = [&](champsim::channel* ul) {
+    return queue_head_ready(ul->WQ) || queue_head_ready(ul->RQ) || queue_head_ready(ul->PQ);
+  };
+
+  auto head_cpu = [](champsim::channel* ul) -> uint32_t {
+    if (!ul->WQ.empty()) return ul->WQ.front().cpu;
+    if (!ul->RQ.empty()) return ul->RQ.front().cpu;
+    if (!ul->PQ.empty()) return ul->PQ.front().cpu;
+    return std::numeric_limits<uint32_t>::max();
+  };
+
+  struct llc_probe_t {
+    uint64_t cycles = 0;
+    uint64_t both_ready = 0;
+    uint64_t both_ready_with_bw = 0;
+    uint64_t first_pos_wins = 0;
+    uint64_t second_pos_wins = 0;
+    uint64_t both_served = 0;
+    uint64_t none_served = 0;
+    std::map<uint32_t, uint64_t> winner_cpu;
+  };
+  static llc_probe_t llc_probe{};
+
+  const bool probe = (NAME == "LLC" && upper_levels.size() == 2);
+  bool both_ready_with_bw = false;
+  std::array<long long, 2> ul_consumed{0, 0};
+  std::array<uint32_t, 2> ul_head_cpu{
+    std::numeric_limits<uint32_t>::max(),
+    std::numeric_limits<uint32_t>::max()
+  };
+
+  if (probe) {
+    ++llc_probe.cycles;
+
+    bool r0 = ul_has_ready_head(upper_levels[0]);
+    bool r1 = ul_has_ready_head(upper_levels[1]);
+
+    // Snapshot head CPU IDs BEFORE queue consumption (fixes undercount).
+    ul_head_cpu[0] = head_cpu(upper_levels[0]);
+    ul_head_cpu[1] = head_cpu(upper_levels[1]);
+
+    if (r0 && r1) {
+      ++llc_probe.both_ready;
+      if (initiate_tag_bw.amount_remaining() > 0) {
+        ++llc_probe.both_ready_with_bw;
+        both_ready_with_bw = true;
+      }
+    }
+  }  
+  // END OF NEW CODE
+
+  // for (auto* ul : upper_levels) {
+  for (std::size_t ul_pos = 0; ul_pos < upper_levels.size(); ++ul_pos) {
+    auto* ul = upper_levels[ul_pos];
     for (auto q : {std::ref(ul->WQ), std::ref(ul->RQ), std::ref(ul->PQ)}) {
       // this needs to be in this loop, we need to ensure that for cases where bandwidth doesn't divide nicely across upstreams,
       // we don't accidentally consume more bandwidth than expected
       champsim::bandwidth per_upper_tag_bw{std::min(per_upper_bandwidth, champsim::bandwidth::maximum_type{initiate_tag_bw.amount_remaining()})};
       auto bandwidth_consumed =
           champsim::transform_while_n(q.get(), std::back_inserter(inflight_tag_check), per_upper_tag_bw, can_translate, initiate_tag_check<true>(ul));
+
       channels_bandwidth_consumed.push_back(bandwidth_consumed);
       initiate_tag_bw.consume(bandwidth_consumed);
+      
+      if (probe && ul_pos < 2)
+        ul_consumed[ul_pos] += bandwidth_consumed;
+    }
+  }
+  // START OF NEW CODE
+  if (probe && both_ready_with_bw) {
+    if (ul_consumed[0] > 0 && ul_consumed[1] == 0) {
+      ++llc_probe.first_pos_wins;
+      if (ul_head_cpu[0] != std::numeric_limits<uint32_t>::max())
+        ++llc_probe.winner_cpu[ul_head_cpu[0]];
+    } else if (ul_consumed[1] > 0 && ul_consumed[0] == 0) {
+      ++llc_probe.second_pos_wins;
+      if (ul_head_cpu[1] != std::numeric_limits<uint32_t>::max())
+        ++llc_probe.winner_cpu[ul_head_cpu[1]];
+    } else if (ul_consumed[0] > 0 && ul_consumed[1] > 0) {
+      ++llc_probe.both_served;
+    } else {
+      ++llc_probe.none_served;
     }
   }
 
+  if (probe && (llc_probe.cycles % 1000000 == 0)) {
+    auto w0 = llc_probe.winner_cpu.count(0) ? llc_probe.winner_cpu.at(0) : 0;
+    auto w1 = llc_probe.winner_cpu.count(1) ? llc_probe.winner_cpu.at(1) : 0;
+
+    fmt::print(
+      "[LLC_PROBE] cycles={} both_ready={} both_ready_with_bw={} "
+      "first_pos_wins={} second_pos_wins={} both_served={} none_served={} "
+      "winner_cpu0={} winner_cpu1={}\n",
+      llc_probe.cycles, llc_probe.both_ready, llc_probe.both_ready_with_bw,
+      llc_probe.first_pos_wins, llc_probe.second_pos_wins,
+      llc_probe.both_served, llc_probe.none_served, w0, w1
+    );
+  }
+  // END OF NEW CODE 
+  
   auto pq_bandwidth_consumed =
       champsim::transform_while_n(internal_PQ, std::back_inserter(inflight_tag_check), initiate_tag_bw, can_translate, initiate_tag_check<false>());
   initiate_tag_bw.consume(pq_bandwidth_consumed);
@@ -880,9 +979,8 @@ void CACHE::end_phase(unsigned finished_cpu)
 {
 
   if (finished_cpu == (this->cpu) || this->NAME == "LLC") {
-    finished_cpu = finished_cpu;
     roi_stats.total_miss_latency_cycles = sim_stats.total_miss_latency_cycles;
-
+    
     roi_stats.hits = sim_stats.hits;
     roi_stats.misses = sim_stats.misses;
     roi_stats.mshr_merge = sim_stats.mshr_merge;
@@ -910,14 +1008,22 @@ void CACHE::end_phase(unsigned finished_cpu)
       ul->roi_stats.WQ_FULL = ul->sim_stats.WQ_FULL;
       ul->roi_stats.WQ_TO_CACHE = ul->sim_stats.WQ_TO_CACHE;
       ul->roi_stats.WQ_FORWARD = ul->sim_stats.WQ_FORWARD;
+
+      sim_stats.collisions_to_wq_per_cpu.clear();
+      for (const auto& [cid, cnt] : ul->sim_stats.per_core_wq_forward)
+          sim_stats.collisions_to_wq_per_cpu[cid] += cnt;
+
+      roi_stats.writebacks_per_cpu = sim_stats.writebacks_per_cpu;
+      roi_stats.collisions_to_wq_per_cpu = sim_stats.collisions_to_wq_per_cpu;
+  
     }
   }
 
-  if (this->NAME == "LLC") 
+  
+  if (this->NAME == "LLC")
   {
     std::cout << "CPU " << finished_cpu << " finished. LLC stats snapshot:\n";
 
-    // List of access types
     const access_type types[] = {
         access_type::LOAD, access_type::RFO, access_type::PREFETCH,
         access_type::WRITE, access_type::TRANSLATION
@@ -928,78 +1034,45 @@ void CACHE::end_phase(unsigned finished_cpu)
     uint64_t total_mshr_merge = 0;
     uint64_t total_mshr_return = 0;
 
-    // Sum totals across all types for this CPU
-    for (const auto type : types) 
+    for (const auto type : types)
     {
-        uint64_t hits_val   = sim_stats.hits.value_or({type, finished_cpu}, 0);
-        uint64_t misses_val = sim_stats.misses.value_or({type, finished_cpu}, 0);
-        uint64_t mshr_merge_val = sim_stats.mshr_merge.value_or({type, finished_cpu}, 0);
-        uint64_t mshr_return_val = sim_stats.mshr_return.value_or({type, finished_cpu}, 0);
+      uint64_t hits_val = sim_stats.hits.value_or({type, finished_cpu}, 0);
+      uint64_t misses_val = sim_stats.misses.value_or({type, finished_cpu}, 0);
+      uint64_t mshr_merge_val = sim_stats.mshr_merge.value_or({type, finished_cpu}, 0);
+      uint64_t mshr_return_val = sim_stats.mshr_return.value_or({type, finished_cpu}, 0);
 
-        total_hits       += hits_val;
-        total_misses     += misses_val;
-        total_mshr_merge += mshr_merge_val;
-        total_mshr_return += mshr_return_val;
+      total_hits += hits_val;
+      total_misses += misses_val;
+      total_mshr_merge += mshr_merge_val;
+      total_mshr_return += mshr_return_val;
 
-        std::cout << "cpu" << finished_cpu << "->LLC "
-                  << access_type_names.at(static_cast<unsigned>(type))
-                  << " ACCESS: " << hits_val + misses_val
-                  << " HIT: " << hits_val
-                  << " MISS: " << misses_val
-                  << " MSHR_MERGE: " << mshr_merge_val << "\n";
+      std::cout << "cpu" << finished_cpu << "->LLC "
+                << access_type_names.at(static_cast<unsigned>(type))
+                << " ACCESS: " << (hits_val + misses_val)
+                << " HIT: " << hits_val
+                << " MISS: " << misses_val
+                << " MSHR_MERGE: " << mshr_merge_val << "\n";
     }
 
-    std::cout << "cpu" << finished_cpu << "->LLC TOTAL ACCESS: " 
-              << total_hits + total_misses 
-              << " HIT: " << total_hits 
-              << " MISS: " << total_misses 
+    std::cout << "cpu" << finished_cpu << "->LLC TOTAL ACCESS: "
+              << (total_hits + total_misses)
+              << " HIT: " << total_hits
+              << " MISS: " << total_misses
               << " MSHR_MERGE: " << total_mshr_merge << "\n";
 
-    std::cout << "cpu" << finished_cpu << "->LLC PREFETCH REQUESTED: " << sim_stats.pf_requested
-              << " ISSUED: " << sim_stats.pf_issued
-              << " USEFUL: " << sim_stats.pf_useful
-              << " USELESS: " << sim_stats.pf_useless << "\n";
+    auto get = [](const auto& m, uint32_t c) -> uint64_t {
+      auto it = m.find(c);
+      return (it != m.end()) ? it->second : 0ULL;
+    };
 
-    std::cout << "cpu" << finished_cpu << "->LLC AVERAGE MISS LATENCY: "
-              << std::ceil((total_misses ? sim_stats.total_miss_latency_cycles / total_misses : 0))
-              << " cycles\n\n";
+    std::cout << "cpu" << finished_cpu << "->LLC WRITEBACKS: "
+              << get(sim_stats.writebacks_per_cpu, finished_cpu) << "\n";
+
+    std::cout << "cpu" << finished_cpu << "->LLC COLLISIONS_TO_WQ (RQ/PQ->WQ): "
+              << get(sim_stats.collisions_to_wq_per_cpu, finished_cpu) << "\n\n";
+
   }
-
 }
-// void CACHE::end_phase(unsigned finished_cpu)
-// {
-//   finished_cpu = finished_cpu;
-//   roi_stats.total_miss_latency_cycles = sim_stats.total_miss_latency_cycles;
-//
-//   roi_stats.hits = sim_stats.hits;
-//   roi_stats.misses = sim_stats.misses;
-//   roi_stats.mshr_merge = sim_stats.mshr_merge;
-//   roi_stats.mshr_return = sim_stats.mshr_return;
-//
-//   roi_stats.pf_requested = sim_stats.pf_requested;
-//   roi_stats.pf_issued = sim_stats.pf_issued;
-//   roi_stats.pf_useful = sim_stats.pf_useful;
-//   roi_stats.pf_useless = sim_stats.pf_useless;
-//   roi_stats.pf_fill = sim_stats.pf_fill;
-//
-//   for (auto* ul : upper_levels) {
-//     ul->roi_stats.RQ_ACCESS = ul->sim_stats.RQ_ACCESS;
-//     ul->roi_stats.RQ_MERGED = ul->sim_stats.RQ_MERGED;
-//     ul->roi_stats.RQ_FULL = ul->sim_stats.RQ_FULL;
-//     ul->roi_stats.RQ_TO_CACHE = ul->sim_stats.RQ_TO_CACHE;
-//
-//     ul->roi_stats.PQ_ACCESS = ul->sim_stats.PQ_ACCESS;
-//     ul->roi_stats.PQ_MERGED = ul->sim_stats.PQ_MERGED;
-//     ul->roi_stats.PQ_FULL = ul->sim_stats.PQ_FULL;
-//     ul->roi_stats.PQ_TO_CACHE = ul->sim_stats.PQ_TO_CACHE;
-//
-//     ul->roi_stats.WQ_ACCESS = ul->sim_stats.WQ_ACCESS;
-//     ul->roi_stats.WQ_MERGED = ul->sim_stats.WQ_MERGED;
-//     ul->roi_stats.WQ_FULL = ul->sim_stats.WQ_FULL;
-//     ul->roi_stats.WQ_TO_CACHE = ul->sim_stats.WQ_TO_CACHE;
-//     ul->roi_stats.WQ_FORWARD = ul->sim_stats.WQ_FORWARD;
-//   }
-// }
 
 template <typename T>
 bool CACHE::should_activate_prefetcher(const T& pkt) const

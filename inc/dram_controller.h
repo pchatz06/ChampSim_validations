@@ -149,7 +149,14 @@ struct DRAM_CHANNEL final : public champsim::operable {
 
   bool write_mode = false;
   champsim::chrono::clock::time_point dbus_cycle_available{};
-
+  uint32_t rr_head = 0;          // head of priority queue: rr_head, rr_head+1, ...
+  uint32_t rr_num_cpus = 1;      // set from config at startup
+  bool rr_used_on_last_pick = false;
+  void set_num_cpus(uint32_t n)
+  {
+    rr_num_cpus = (n == 0) ? 1u : n;
+    rr_head %= rr_num_cpus;
+  }
   std::size_t refresh_row = 0;
   champsim::chrono::clock::time_point last_refresh{};
   std::size_t DRAM_ROWS_PER_REFRESH;
@@ -262,6 +269,7 @@ public:
                     std::size_t chans, champsim::data::bytes chan_width, std::size_t rows, std::size_t columns, std::size_t ranks, std::size_t bankgroups,
                     std::size_t banks, std::size_t refreshes_per_period);
 
+  void set_num_cpus(uint32_t n);
   uint64_t operate_total = 0;
   uint64_t bw_hist[16] = {0};
 

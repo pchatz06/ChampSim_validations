@@ -23,6 +23,7 @@
 #include <limits>
 #include <string_view>
 #include <vector>
+#include <map>
 
 #include "access_type.h"
 #include "address.h"
@@ -45,6 +46,8 @@ struct cache_queue_stats {
   uint64_t WQ_FULL = 0;
   uint64_t WQ_TO_CACHE = 0;
   uint64_t WQ_FORWARD = 0;
+
+  std::map<uint32_t, uint64_t> per_core_wq_forward{};
 };
 
 class channel

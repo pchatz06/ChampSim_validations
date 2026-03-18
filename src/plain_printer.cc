@@ -148,10 +148,14 @@ std::vector<std::string> champsim::plain_printer::format(DRAM_CHANNEL::stats_typ
   for (auto& [k, v] : stats.per_core_rq_admitted) cpus.insert(k);
   for (auto& [k, v] : stats.per_core_rq_dispatched) cpus.insert(k);
   for (auto& [k, v] : stats.per_core_dbus_served) cpus.insert(k);
+  for (auto& [k, v] : stats.per_core_rr_tie_wins) cpus.insert(k);
+  for (auto& [k, v] : stats.per_core_rr_tie_losses) cpus.insert(k);
 
   if (!cpus.empty()) {
     lines.push_back(fmt::format(""));
     lines.push_back(fmt::format("{} === Per-Core DRAM Fairness ===", stats.name));
+    lines.push_back(fmt::format("  RR tie candidates: {:10}  RR tie decisions: {:10}",
+    stats.rr_tie_candidates, stats.rr_tie_decisions));
 
     for (auto cpu_id : cpus) {
       // Skip the "max" sentinel value (means CPU was never set)
@@ -181,6 +185,18 @@ std::vector<std::string> champsim::plain_printer::format(DRAM_CHANNEL::stats_typ
           get(stats.per_core_dbus_served, cpu_id),
           get(stats.per_core_dbus_congested, cpu_id),
           get_long(stats.per_core_dbus_congestion_cycles, cpu_id)));
+
+      // auto qwait_sum = get(stats.per_core_qwait_sum, cpu_id);
+      // auto qwait_cnt = get(stats.per_core_qwait_cnt, cpu_id);
+      // double qwait_avg = qwait_cnt ? static_cast<double>(qwait_sum) / static_cast<double>(qwait_cnt) : 0.0;
+      //
+      // lines.push_back(fmt::format("    RR tie wins: {:10}  RR tie losses: {:10}",
+      //     get(stats.per_core_rr_tie_wins, cpu_id),
+      //     get(stats.per_core_rr_tie_losses, cpu_id)));
+      lines.push_back(fmt::format("    RR tie wins: {:10}  RR tie losses: {:10}",
+        get(stats.per_core_rr_tie_wins, cpu_id),
+        get(stats.per_core_rr_tie_losses, cpu_id)));
+
 
       // Per-bank distribution (compact)
       std::string bank_line = "    Banks: ";

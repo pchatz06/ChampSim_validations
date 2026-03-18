@@ -25,6 +25,15 @@ struct dram_stats {
   std::map<uint32_t, uint64_t> per_core_rq_admitted;
   std::map<uint32_t, uint64_t> per_core_wq_admitted;
   std::map<std::size_t, uint64_t> queue_position_rq_admitted;
+
+  // NEW: tie + queue-wait stats
+  uint64_t rr_tie_candidates = 0;
+  uint64_t rr_tie_decisions = 0;
+  std::map<uint32_t, uint64_t> per_core_rr_tie_wins;
+  std::map<uint32_t, uint64_t> per_core_rr_tie_losses;
+
+  std::map<uint32_t, uint64_t> per_core_qwait_sum;
+  std::map<uint32_t, uint64_t> per_core_qwait_cnt;
 };
 
 dram_stats operator-(dram_stats lhs, dram_stats rhs);

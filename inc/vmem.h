@@ -23,6 +23,7 @@
 #include <optional>
 #include <random>
 
+#include <vector>
 #include "address.h"
 #include "champsim.h"
 #include "chrono.h"
@@ -39,7 +40,12 @@ private:
   std::optional<uint64_t> randomization_seed;
   MEMORY_CONTROLLER& dram;
 
+  // std::vector<uint32_t> cpu_asid_map;
+  // [[nodiscard]] uint32_t asid_key(uint32_t cpu_num) const;
+
 public:
+
+  // void set_cpu_asid_map(std::vector<uint32_t> map);
   const champsim::chrono::clock::duration minor_fault_penalty;
   const std::size_t pt_levels;
   const pte_entry pte_page_size; // Size of a PTE page

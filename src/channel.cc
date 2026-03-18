@@ -89,6 +89,8 @@ void champsim::channel::check_collision()
   for (auto rq_it = std::find_if(std::begin(RQ), std::end(RQ), std::not_fn(&request_type::forward_checked)); rq_it != std::end(RQ);) {
     if (do_collision_for_return(std::begin(WQ), std::end(WQ), *rq_it, write_shamt, returned)) {
       sim_stats.WQ_FORWARD++;
+      if (rq_it->cpu != std::numeric_limits<uint32_t>::max())
+        sim_stats.per_core_wq_forward[rq_it->cpu]++;   // NEW - stat
       rq_it = RQ.erase(rq_it);
     } else if (do_collision_for_merge(std::begin(RQ), rq_it, *rq_it, read_shamt)) {
       sim_stats.RQ_MERGED++;
@@ -103,6 +105,8 @@ void champsim::channel::check_collision()
   for (auto pq_it = std::find_if(std::begin(PQ), std::end(PQ), std::not_fn(&request_type::forward_checked)); pq_it != std::end(PQ);) {
     if (do_collision_for_return(std::begin(WQ), std::end(WQ), *pq_it, write_shamt, returned)) {
       sim_stats.WQ_FORWARD++;
+      if (pq_it->cpu != std::numeric_limits<uint32_t>::max())
+        sim_stats.per_core_wq_forward[pq_it->cpu]++;   // NEW - stat
       pq_it = PQ.erase(pq_it);
     } else if (do_collision_for_merge(std::begin(PQ), pq_it, *pq_it, read_shamt)) {
       sim_stats.PQ_MERGED++;

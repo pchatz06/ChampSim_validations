@@ -279,7 +279,7 @@ class NormalizedConfiguration:
         
         #this allows frequency to be specified instead of data rate or vice-versa for DRAM
         if('frequency' in self.pmem.keys()):
-            self.pmem['data_rate'] = self.pmem['frequency']
+            # self.pmem['data_rate'] = self.pmem['frequency']
             self.pmem['frequency'] = self.pmem['frequency']/2
         elif('data_rate' in self.pmem.keys()):
             self.pmem['frequency'] = self.pmem['data_rate']/2

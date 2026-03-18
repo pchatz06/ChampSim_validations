@@ -5,6 +5,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <map>
 
 #include "channel.h"
 #include "event_counter.h"
@@ -17,6 +18,9 @@ struct cache_stats {
   uint64_t pf_useful = 0;
   uint64_t pf_useless = 0;
   uint64_t pf_fill = 0;
+  
+  std::map<uint32_t, uint64_t> writebacks_per_cpu{};        // NEW
+  std::map<uint32_t, uint64_t> collisions_to_wq_per_cpu{};  // NEW
 
   champsim::stats::event_counter<std::pair<access_type, std::remove_cv_t<decltype(NUM_CPUS)>>> hits = {};
   champsim::stats::event_counter<std::pair<access_type, std::remove_cv_t<decltype(NUM_CPUS)>>> misses = {};

@@ -21,6 +21,8 @@
 #include <vector>
 #include <CLI/CLI.hpp>
 #include <fmt/core.h>
+#include <filesystem>
+#include <string_view>
 
 #include "cache.h" // for CACHE
 #include "champsim.h"
@@ -35,6 +37,7 @@
 #include "stats_printer.h"
 #include "tracereader.h"
 #include "vmem.h"
+
 
 namespace champsim
 {
@@ -54,6 +57,27 @@ const unsigned LOG2_PAGE_SIZE = champsim::lg2(PAGE_SIZE);
 
 // Singleton environment pointer
 static configured_environment* g_env;
+
+// namespace
+// {
+//
+// uint32_t stable_workload_asid(std::string_view workload_name)
+// {
+//   if (workload_name.find("omnetpp") != std::string_view::npos)
+//     return 0u;
+//   if (workload_name.find("xalancbmk") != std::string_view::npos)
+//     return 1u;
+//
+//   // fallback for unknown names
+//   return 0u;
+// }
+//
+// std::string workload_key_from_path(const std::string& path)
+// {
+//   auto filename = std::filesystem::path(path).filename().string();
+//   return filename.empty() ? path : filename;
+// }
+// } // namespace
 
 //------------------------------------//
 // DPC4 API
@@ -103,9 +127,33 @@ int main(int argc, char** argv) // NOLINT(bugprone-exception-escape)
   app.add_option("traces", trace_names, "The paths to the traces")->required()->expected(NUM_CPUS)->check(CLI::ExistingFile);
 
   CLI11_PARSE(app, argc, argv);
+  // // Build VMEM ASID map from workload names (no run-command env needed)
+  // {
+  //   auto ptws = gen_environment.ptw_view();
+  //   if (!ptws.empty() && ptws.front().get().vmem != nullptr) {
+  //     std::vector<uint32_t> asid_map;
+  //     asid_map.reserve(trace_names.size());
+  //
+  //     for (const auto& trace_name : trace_names) {
+  //       auto workload_key = workload_key_from_path(trace_name);
+  //       asid_map.push_back(stable_workload_asid(workload_key));
+  //     }
+  //
+  //     ptws.front().get().vmem->set_cpu_asid_map(std::move(asid_map));
+  //
+  //     for (std::size_t i = 0; i < trace_names.size(); ++i) {
+  //       auto workload_key = workload_key_from_path(trace_names[i]);
+  //       auto asid = stable_workload_asid(workload_key);
+  //       asid_map.push_back(asid);
+  //
+  //       fmt::print("[VMEM_ASID] cpu:{} benchmark:{} asid:{}\n", i, workload_key, asid);
+  //     } 
+  //   }
+  // }
 
   g_env = &gen_environment;
 
+  gen_environment.dram_view().set_num_cpus(static_cast<uint32_t>(NUM_CPUS));
   for (O3_CPU& cpu : gen_environment.cpu_view()) {
     cpu.show_heartbeat = hide_heartbeat ? false : true;
     cpu.heartbeat_interval = heartbeat_interval;
